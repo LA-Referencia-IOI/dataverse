@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:h="http://java.sun.com/jsf/html"
+      xmlns:f="http://java.sun.com/jsf/core"
+      xmlns:ui="http://java.sun.com/jsf/facelets"
+      xmlns:jsf="http://xmlns.jcp.org/jsf"
+      xmlns:p="http://primefaces.org/ui">
+    <h:head>
+    </h:head>
+
+    <h:body>
+        <f:metadata>
+            <f:viewAction action="#{dataverseSession.updateLocaleInViewRoot}"/>
+            <f:viewAction action="#{DarkDashboardPage.init}"/>
+            <f:viewAction action="#{dataverseHeaderFragment.initBreadcrumbs(dataverseServiceBean.findRootDataverse())}"/>
+            <f:viewAction action="#{dataverseHeaderFragment.addBreadcrumb('/dashboard.xhtml', bundle['dashboard.title'])}"/>
+            <f:viewAction action="#{dataverseHeaderFragment.addBreadcrumb(bundle['dashboard.dark.title'])}"/>
+        </f:metadata>
+
+        <ui:composition template="/dataverse_template.xhtml">
+            <ui:param name="pageTitle" value="#{bundle['dashboard.dark.title']} - #{dataverseServiceBean.findRootDataverse().name}"/>
+            <ui:param name="showDataverseHeader" value="false"/>
+            <ui:define name="body">
+                <h:form id="darkForm">
+
+                    <!-- Disabled / not configured -->
+                    <div class="alert alert-warning" jsf:rendered="#{!DarkDashboardPage.enabled}">
+                        <span class="glyphicon glyphicon-warning-sign"/> #{bundle['dashboard.dark.disabled']}
+                    </div>
+
+                    <!-- Summary -->
+                    <div class="row text-center margin-bottom">
+                        <div class="col-xs-4 col-sm-2">
+                            <strong>#{DarkDashboardPage.getCount('total')}</strong>
+                            <p class="small text-muted">#{bundle['dashboard.dark.summary.total']}</p>
+                        </div>
+                        <ui:repeat value="#{DarkDashboardPage.statusOptions}" var="code">
+                            <div class="col-xs-4 col-sm-1">
+                                <strong>#{DarkDashboardPage.getStatusCount(code)}</strong>
+                                <p class="small text-muted">#{DarkDashboardPage.stateLabel(code)}</p>
+                            </div>
+                        </ui:repeat>
+                        <div class="col-xs-4 col-sm-1">
+                            <strong class="#{DarkDashboardPage.getCount('stuck') gt 0 ? 'text-danger' : ''}">#{DarkDashboardPage.getCount('stuck')}</strong>
+                            <p class="small text-muted">#{bundle['dashboard.dark.summary.stuck']}</p>
+                        </div>
+                        <div class="col-xs-4 col-sm-2">
+                            <strong class="#{DarkDashboardPage.getCount('withErrors') gt 0 ? 'text-danger' : ''}">#{DarkDashboardPage.getCount('withErrors')}</strong>
+                            <p class="small text-muted">#{bundle['dashboard.dark.summary.errors']}</p>
+                        </div>
+                        <div class="col-xs-4 col-sm-2">
+                            <strong>#{DarkDashboardPage.getCount('missing')}</strong>
+                            <p class="small text-muted">#{bundle['dashboard.dark.summary.missing']}</p>
+                        </div>
+                        <div class="col-xs-4 col-sm-2" jsf:rendered="#{DarkDashboardPage.getCount('notEligible') gt 0}">
+                            <strong class="text-warning">#{DarkDashboardPage.getCount('notEligible')}</strong>
+                            <p class="small text-muted">#{bundle['dashboard.dark.summary.notEligible']}</p>
+                        </div>
+                    </div>
+
+                    <p class="small text-muted" jsf:rendered="#{not empty DarkDashboardPage.lastJob}">#{DarkDashboardPage.lastJob}</p>
+
+                    <!-- View switch and global actions -->
+                    <div class="button-block margin-bottom">
+                        <div class="btn-group">
+                            <p:commandLink styleClass="btn btn-default #{DarkDashboardPage.missingView ? '' : 'active'}"
+                                           action="#{DarkDashboardPage.showAssigned}" update="@form">
+                                #{bundle['dashboard.dark.view.assigned']}
+                            </p:commandLink>
+                            <p:commandLink styleClass="btn btn-default #{DarkDashboardPage.missingView ? 'active' : ''}"
+                                           action="#{DarkDashboardPage.showMissing}" update="@form">
+                                #{bundle['dashboard.dark.view.missing']}
+                            </p:commandLink>
+                        </div>
+                        <p:commandLink styleClass="btn btn-default" action="#{DarkDashboardPage.runRefresh}"
+                                       update="@form,:messagePanel" rendered="#{DarkDashboardPage.enabled}">
+                            <span class="glyphicon glyphicon-refresh"/> #{bundle['dashboard.dark.action.runRefresh']}
+                        </p:commandLink>
+                        <p:commandLink styleClass="btn btn-default" action="#{DarkDashboardPage.assignAll}"
+                                       update="@form,:messagePanel"
+                                       rendered="#{DarkDashboardPage.enabled and DarkDashboardPage.missingView and DarkDashboardPage.total gt 0}">
+                            <span class="glyphicon glyphicon-plus"/> #{bundle['dashboard.dark.action.assignAll']}
+                        </p:commandLink>
+                        <h:commandLink styleClass="btn btn-default" action="#{DarkDashboardPage.exportCsv}"
+                                       rendered="#{!DarkDashboardPage.missingView}">
+                            <span class="glyphicon glyphicon-download-alt"/> #{bundle['dashboard.dark.action.export']}
+                        </h:commandLink>
+                    </div>
+
+                    <!-- Filters -->
+                    <div class="form-inline margin-bottom">
+                        <div class="form-group" jsf:rendered="#{!DarkDashboardPage.missingView}">
+                            <label for="arkFilter">#{bundle['dashboard.dark.filter.ark']}</label>
+                            <p:inputText id="arkFilter" styleClass="form-control" value="#{DarkDashboardPage.arkFilter}"/>
+                        </div>
+                        <div class="form-group" jsf:rendered="#{!DarkDashboardPage.missingView}">
+                            <label for="statusFilter">#{bundle['dashboard.dark.filter.status']}</label>
+                            <h:selectOneMenu id="statusFilter" styleClass="form-control" value="#{DarkDashboardPage.statusFilter}">
+                                <f:selectItem itemValue="" itemLabel="#{bundle['dashboard.dark.filter.status.all']}"/>
+                                <f:selectItems value="#{DarkDashboardPage.statusOptions}" var="code"
+                                               itemValue="#{code}" itemLabel="#{DarkDashboardPage.stateLabel(code)}"/>
+                            </h:selectOneMenu>
+                        </div>
+                        <div class="form-group">
+                            <label for="datasetIdFilter">#{bundle['dashboard.dark.filter.datasetId']}</label>
+                            <p:inputText id="datasetIdFilter" styleClass="form-control" size="8" value="#{DarkDashboardPage.datasetIdFilter}"/>
+                        </div>
+                        <div class="checkbox" jsf:rendered="#{!DarkDashboardPage.missingView}">
+                            <label>
+                                <h:selectBooleanCheckbox value="#{DarkDashboardPage.errorsOnly}"/> #{bundle['dashboard.dark.filter.errorsOnly']}
+                            </label>
+                        </div>
+                        <p:commandButton styleClass="btn btn-default" value="#{bundle['dashboard.dark.filter.apply']}"
+                                         action="#{DarkDashboardPage.applyFilters}" update="@form"/>
+                        <p:commandButton styleClass="btn btn-link" value="#{bundle['dashboard.dark.filter.clear']}"
+                                         action="#{DarkDashboardPage.clearFilters}" update="@form" process="@this"/>
+                    </div>
+
+                    <!-- Assigned view -->
+                    <h:panelGroup rendered="#{!DarkDashboardPage.missingView}">
+                        <div class="table-responsive">
+                            <table class="table table-striped table-condensed">
+                                <thead>
+                                    <tr>
+                                        <th>#{bundle['dashboard.dark.col.ark']}</th>
+                                        <th>#{bundle['dashboard.dark.col.dataset']}</th>
+                                        <th>#{bundle['dashboard.dark.col.status']}</th>
+                                        <th>#{bundle['dashboard.dark.col.target']}</th>
+                                        <th>#{bundle['dashboard.dark.col.error']}</th>
+                                        <th>#{bundle['dashboard.dark.col.created']}</th>
+                                        <th>#{bundle['dashboard.dark.col.updated']}</th>
+                                        <th>#{bundle['dashboard.dark.col.actions']}</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <ui:repeat value="#{DarkDashboardPage.assignedRows}" var="row">
+                                        <tr>
+                                            <td><code>#{row.ark}</code></td>
+                                            <td>
+                                                <h:outputLink value="/dataset.xhtml" rendered="#{not empty row.persistentId}">
+                                                    <f:param name="persistentId" value="#{row.persistentId}"/>
+                                                    #{row.persistentId}
+                                                </h:outputLink>
+                                                <h:outputText value="—" rendered="#{empty row.persistentId}"/>
+                                                <div class="small text-muted">#{row.title}</div>
+                                            </td>
+                                            <td>
+                                                <span class="label #{row.status eq 'PUBLISHED' ? 'label-success' : (row.status eq 'TOMBSTONE' ? 'label-default' : 'label-info')}">
+                                                    #{DarkDashboardPage.stateLabel(row.status)}
+                                                </span>
+                                                <span class="label label-danger" jsf:rendered="#{row.stuck}">#{bundle['dashboard.dark.stuck']}</span>
+                                                <div class="small text-muted" jsf:rendered="#{not empty row.sentVersion}">v#{row.sentVersion}</div>
+                                            </td>
+                                            <td class="small">
+                                                <h:outputLink value="#{row.target}" target="_blank" rendered="#{not empty row.target}">#{row.target}</h:outputLink>
+                                            </td>
+                                            <td class="small text-danger">#{row.lastError}</td>
+                                            <td class="small">#{DarkDashboardPage.format(row.createdAt)}</td>
+                                            <td class="small">#{DarkDashboardPage.format(row.updatedAt)}</td>
+                                            <td>
+                                                <p:commandLink styleClass="btn btn-xs btn-default"
+                                                               action="#{DarkDashboardPage.assign(row.datasetId)}"
+                                                               update="@form,:messagePanel"
+                                                               rendered="#{DarkDashboardPage.enabled and not empty row.lastError and not empty row.datasetId}">
+                                                    #{bundle['dashboard.dark.action.retry']}
+                                                </p:commandLink>
+                                                <p:commandLink styleClass="btn btn-xs btn-default"
+                                                               action="#{DarkDashboardPage.refresh(row.datasetId)}"
+                                                               update="@form,:messagePanel"
+                                                               rendered="#{DarkDashboardPage.enabled and row.status.inProgress and not empty row.datasetId}">
+                                                    #{bundle['dashboard.dark.action.refresh']}
+                                                </p:commandLink>
+                                            </td>
+                                        </tr>
+                                    </ui:repeat>
+                                </tbody>
+                            </table>
+                        </div>
+                    </h:panelGroup>
+
+                    <!-- Missing view -->
+                    <h:panelGroup rendered="#{DarkDashboardPage.missingView}">
+                        <div class="table-responsive">
+                            <table class="table table-striped table-condensed">
+                                <thead>
+                                    <tr>
+                                        <th>#{bundle['dashboard.dark.filter.datasetId']}</th>
+                                        <th>#{bundle['dashboard.dark.col.dataset']}</th>
+                                        <th>#{bundle['dashboard.dark.col.published']}</th>
+                                        <th>#{bundle['dashboard.dark.col.actions']}</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <ui:repeat value="#{DarkDashboardPage.missingRows}" var="row">
+                                        <tr>
+                                            <td>#{row.datasetId}</td>
+                                            <td>
+                                                <h:outputLink value="/dataset.xhtml" rendered="#{not empty row.persistentId}">
+                                                    <f:param name="persistentId" value="#{row.persistentId}"/>
+                                                    #{row.persistentId}
+                                                </h:outputLink>
+                                                <div class="small text-muted">#{row.title}</div>
+                                            </td>
+                                            <td>
+                                                <span class="glyphicon glyphicon-ok text-success" jsf:rendered="#{row.published}"/>
+                                            </td>
+                                            <td>
+                                                <p:commandLink styleClass="btn btn-xs btn-default"
+                                                               action="#{DarkDashboardPage.assign(row.datasetId)}"
+                                                               update="@form,:messagePanel"
+                                                               rendered="#{DarkDashboardPage.enabled}">
+                                                    #{bundle['dashboard.dark.action.assign']}
+                                                </p:commandLink>
+                                            </td>
+                                        </tr>
+                                    </ui:repeat>
+                                </tbody>
+                            </table>
+                        </div>
+                    </h:panelGroup>
+
+                    <p class="text-muted" jsf:rendered="#{DarkDashboardPage.total eq 0}">#{bundle['dashboard.dark.empty']}</p>
+
+                    <!-- Pagination -->
+                    <div class="text-center" jsf:rendered="#{DarkDashboardPage.total gt 0}">
+                        <p:commandLink styleClass="btn btn-default btn-sm" action="#{DarkDashboardPage.previousPage}"
+                                       update="@form" rendered="#{DarkDashboardPage.pageNumber gt 1}">
+                            #{bundle['dashboard.dark.page.prev']}
+                        </p:commandLink>
+                        <span class="small text-muted" style="margin: 0 1em;">
+                            <h:outputFormat value="#{bundle['dashboard.dark.page']}">
+                                <f:param value="#{DarkDashboardPage.pageNumber}"/>
+                                <f:param value="#{DarkDashboardPage.pageCount}"/>
+                                <f:param value="#{DarkDashboardPage.total}"/>
+                            </h:outputFormat>
+                        </span>
+                        <p:commandLink styleClass="btn btn-default btn-sm" action="#{DarkDashboardPage.nextPage}"
+                                       update="@form" rendered="#{DarkDashboardPage.pageNumber lt DarkDashboardPage.pageCount}">
+                            #{bundle['dashboard.dark.page.next']}
+                        </p:commandLink>
+                    </div>
+
+                    <div class="button-block">
+                        <p:button styleClass="btn btn-link" outcome="dashboard" value="#{bundle['cancel']}"/>
+                    </div>
+                </h:form>
+            </ui:define>
+        </ui:composition>
+    </h:body>
+</html>

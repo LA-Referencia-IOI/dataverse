@@ -8,6 +8,7 @@ package edu.harvard.iq.dataverse.engine.command.impl;
 
 import edu.harvard.iq.dataverse.Dataset;
 import edu.harvard.iq.dataverse.DatasetVersion;
+import edu.harvard.iq.dataverse.dark.DarkHooks;
 import edu.harvard.iq.dataverse.authorization.Permission;
 import edu.harvard.iq.dataverse.engine.command.AbstractCommand;
 
@@ -110,6 +111,7 @@ public class DeaccessionDatasetVersionCommand extends AbstractCommand<DatasetVer
         Dataset dataset = version.getDataset();
 
         ctxt.index().asyncIndexDataset(dataset, true);
+        DarkHooks.datasetDeaccessioned(theVersion.getDataset()); // dARK: tombstone if no published version remains
         return retVal;
     }
 

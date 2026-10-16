@@ -1,6 +1,7 @@
 package edu.harvard.iq.dataverse.engine.command.impl;
 
 import edu.harvard.iq.dataverse.authorization.Permission;
+import edu.harvard.iq.dataverse.dark.DarkHooks;
 import edu.harvard.iq.dataverse.engine.command.CommandContext;
 import edu.harvard.iq.dataverse.engine.command.DataverseRequest;
 import edu.harvard.iq.dataverse.engine.command.RequiredPermissions;
@@ -244,9 +245,11 @@ public class CuratePublishedDatasetVersionCommand extends AbstractDatasetCommand
     public boolean onSuccess(CommandContext ctxt, Object r) {
         boolean retVal = true;
         Dataset d = (Dataset) r;
-        
+
         ctxt.index().asyncIndexDataset(d, true);
-        
+
+        DarkHooks.datasetCurated(getDataset()); // dARK: resend metadata after commit
+
         // And the exported metadata files
         try {
             ExportService instance = ExportService.getInstance();

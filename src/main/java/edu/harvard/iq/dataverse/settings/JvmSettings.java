@@ -320,6 +320,23 @@ public enum JvmSettings {
     SCOPE_COARNOTIFY(SCOPE_LINKEDDATANOTIFICATION, "coar-notify"),
     SCOPE_COARNOTIFY_RELATIONSHIP_ANNOUNCEMENT(SCOPE_COARNOTIFY, "relationship-announcement"),
     COARNOTIFY_RELATIONSHIP_ANNOUNCEMENT_NOTIFY_SUPERUSERS_ONLY(SCOPE_COARNOTIFY_RELATIONSHIP_ANNOUNCEMENT, "notify-superusers-only"),
+
+    // dARK SETTINGS (see edu.harvard.iq.dataverse.dark)
+    SCOPE_DARK(PREFIX, "dark"),
+    DARK_ENABLED(SCOPE_DARK, "enabled"),
+    DARK_MINTER_URL(SCOPE_DARK, "minter-url"),
+    DARK_AUTHORITY_ID(SCOPE_DARK, "authority-id"),
+    DARK_NAAN(SCOPE_DARK, "naan"),
+    DARK_API_TOKEN(SCOPE_DARK, "api-token"),
+    DARK_AUTHORITY_HEADER(SCOPE_DARK, "authority-header"),
+    DARK_AUTHORITY_HEADER_ENABLED(DARK_AUTHORITY_HEADER, "enabled"),
+    DARK_BATCH_SIZE(SCOPE_DARK, "batch-size"),
+    DARK_OTHER_ID_AGENCY(SCOPE_DARK, "other-id-agency"),
+    DARK_TARGET(SCOPE_DARK, "target"),
+    DARK_MAX_ATTEMPTS(SCOPE_DARK, "max-attempts"),
+    DARK_HTTP_TIMEOUT_SECONDS(SCOPE_DARK, "http-timeout-seconds"),
+    DARK_TOMBSTONE_UNPUBLISHED_DRAFTS(SCOPE_DARK, "tombstone-unpublished-drafts"),
+    DARK_PUBLISHER(SCOPE_DARK, "publisher"),
    ;
 
     private static final String SCOPE_SEPARATOR = ".";

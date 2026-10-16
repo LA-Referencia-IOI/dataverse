@@ -5,6 +5,7 @@ import edu.harvard.iq.dataverse.Dataset;
 import edu.harvard.iq.dataverse.DatasetVersion;
 import edu.harvard.iq.dataverse.authorization.Permission;
 import edu.harvard.iq.dataverse.authorization.users.AuthenticatedUser;
+import edu.harvard.iq.dataverse.dark.DarkHooks;
 import edu.harvard.iq.dataverse.dataaccess.DataAccess;
 import edu.harvard.iq.dataverse.dataset.DatasetType;
 import edu.harvard.iq.dataverse.engine.command.CommandContext;
@@ -196,6 +197,12 @@ public abstract class AbstractCreateDatasetCommand extends AbstractDatasetComman
         }
                
         return theDataset;
+    }
+
+    @Override
+    public boolean onSuccess(CommandContext ctxt, Object r) {
+        DarkHooks.datasetCreated(getDataset()); // dARK: 
+        return true;
     }
 
     @Override

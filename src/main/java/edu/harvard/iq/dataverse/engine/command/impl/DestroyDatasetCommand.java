@@ -1,6 +1,7 @@
 package edu.harvard.iq.dataverse.engine.command.impl;
 
 import edu.harvard.iq.dataverse.DataFile;
+import edu.harvard.iq.dataverse.dark.DarkHooks;
 import edu.harvard.iq.dataverse.Dataset;
 import edu.harvard.iq.dataverse.DatasetVersion;
 import edu.harvard.iq.dataverse.Dataverse;
@@ -174,7 +175,9 @@ public class DestroyDatasetCommand extends AbstractVoidCommand {
     public boolean onSuccess(CommandContext ctxt, Object r) {
 
         boolean retVal = true;
-        
+
+        DarkHooks.datasetDestroyed(doomed); // dARK: tombstone (also never-published drafts)
+
        // all the real Solr work is done here
        // delete orphaned Solr ids
         IndexResponse resultOfSolrDeletionAttempt = ctxt.solrIndex().deleteMultipleSolrIds(datasetAndFileSolrIdsToDelete);

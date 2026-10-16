@@ -154,6 +154,25 @@
                                 </div>
                             </div>
 
+                            <!-- dARK integration -->
+                            <div class="col-md-4">
+                                <div class="card-box">
+                                    <h4 class="header-title">#{bundle['dashboard.card.dark.header']}</h4>
+                                    <div class="row text-center">
+                                        <div class="col-xs-12" jsf:rendered="#{!darkServiceBean.enabled}">
+                                            <p class="small text-muted">#{bundle['dashboard.card.dark.disabled']}</p>
+                                        </div>
+                                    </div>
+                                    <div class="row text-center">
+                                        <div class="col-xs-12">
+                                            <p>
+                                                <a href="/dashboard-dark.xhtml" class="btn btn-primary" role="button">#{bundle['dashboard.card.dark.btn.manage']}</a>
+                                            </p>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
                         </div>
                     </div>
                 </div>
