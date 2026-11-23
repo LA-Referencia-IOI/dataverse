@@ -70,7 +70,7 @@ public final class DarkMetadataBuilder {
      * Extracts Level 1 values from a published (or being-published) version.
      *
      * @param ark        compact ARK
-     * @param publisher  name of the installation (decision 14.6)
+     * @param publisher  see {@link DarkConfig#resolvePublisher}
      * @param landingUrl URL of the dataset page
      */
     public static Level1 fromVersion(DatasetVersion version, String ark, String publisher, String landingUrl) {

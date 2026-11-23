@@ -34,8 +34,6 @@ import java.sql.Timestamp;
             query = "SELECT d FROM Dark d WHERE d.ark = :ark"),
     @NamedQuery(name = "Dark.findByClientItemId",
             query = "SELECT d FROM Dark d WHERE d.clientItemId = :clientItemId ORDER BY d.createdAt DESC"),
-    @NamedQuery(name = "Dark.findByStatus",
-            query = "SELECT d FROM Dark d WHERE d.status = :status ORDER BY d.updatedAt ASC"),
     @NamedQuery(name = "Dark.countByStatus",
             query = "SELECT d.status, COUNT(d) FROM Dark d GROUP BY d.status")
 })
@@ -48,7 +46,7 @@ public class Dark implements Serializable {
     private Long id;
 
     /**
-     * The foreign key is owned by Flyway ({@code ON DELETE SET NULL}, so destroying a
+     * The foreign key is owned by Flyway ({@code V6.12.1.1.sql}: {@code ON DELETE SET NULL}, so destroying a
      * dataset keeps the row); EclipseLink must not generate its own restrictive one.
      */
     @OneToOne
@@ -75,9 +73,6 @@ public class Dark implements Serializable {
     @Column(name = "tombstone_requested", nullable = false)
     private boolean tombstoneRequested;
 
-    @Column(name = "was_published", nullable = false)
-    private boolean wasPublished;
-
     @Column(name = "reservation_token", length = 36)
     private String reservationToken;
 
@@ -87,10 +82,10 @@ public class Dark implements Serializable {
 
 
     @Convert(converter = DarkState.DbConverter.class)
-    @Column(nullable = false, length = 1, columnDefinition = "CHAR(1)")
+    @Column(nullable = false, length = 1, columnDefinition = "CHAR(1) NOT NULL")
     private DarkState status;
 
-    /** Normalized DOI of the dataset, as sent to the Minter. */
+    /** Normalized PID of the dataset ({@link DarkIds#clientItemId}), as sent to the Minter. */
     @Column(name = "client_item_id", nullable = false, length = 100)
     private String clientItemId;
 
@@ -110,7 +105,7 @@ public class Dark implements Serializable {
     @Column(name = "level2_cid", length = 128)
     private String level2Cid;
 
-    /** Status checks performed without reaching {@link DarkState#PUBLISHED}. */
+    /** Consecutive failures: status checks that did not reach P, or requests the Minter rejected (see DarkPolicy). */
     @Column(nullable = false)
     private int attempts;
 
@@ -203,8 +198,6 @@ public class Dark implements Serializable {
     public void setSentRevision(Long revision) { sentRevision = revision; }
     public boolean isTombstoneRequested() { return tombstoneRequested; }
     public void setTombstoneRequested(boolean requested) { tombstoneRequested = requested; }
-    public boolean wasPublished() { return wasPublished; }
-    public void setWasPublished(boolean published) { wasPublished = published; }
 
     public String getReservationToken() { return reservationToken; }
     public void setReservationToken(String token) { reservationToken = token; }
@@ -265,6 +258,11 @@ public class Dark implements Serializable {
 
     public Timestamp getUpdatedAt() {
         return updatedAt;
+    }
+
+    /** @return true if the row has an ARK that is neither tombstoned nor about to be. */
+    public boolean isActive() {
+        return ark != null && !tombstoneRequested && status != DarkState.TOMBSTONE;
     }
 
     /** Touches {@code updated_at} (also when only a counter changed). */

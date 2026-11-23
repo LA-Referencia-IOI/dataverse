@@ -143,7 +143,7 @@ public final class DarkIds {
 
     /**
      * Resolver URL of the dataset's own PID, used as the default ARK target:
-     * {@code https://doi.org/<doi>} (lower case, as before), {@code https://hdl.handle.net/<handle>},
+     * {@code https://doi.org/<doi>} (lower case), {@code https://hdl.handle.net/<handle>},
      * or the PermaLink base URL + identifier.
      *
      * @return the URL, or {@code null} if the dataset has no PID.

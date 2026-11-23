@@ -132,7 +132,7 @@ public class DarkIT {
 
     /**
      * End to end against a Minter: create → R → publish → Other ID + D → refresh → P →
-     * new version → U → refresh → P → deaccession → T.
+     * new version → U → refresh → P → deaccession (ARK kept) → destroy → T.
      */
     @Test
     public void lifecycleAgainstMinter() throws Exception {
@@ -174,13 +174,35 @@ public class DarkIT {
         JsonPath p2 = waitFor(datasetId, s -> s.equals("P"), 600, true);
         assertEquals("2.0", p2.getString("sentVersion"));
 
-        // deaccession of every version → T
+        // deaccession of every version: the dataset still exists and can be published again,
+        // so its ARK is kept
         UtilIT.deaccessionDataset(datasetId, "2.0", "dARK IT", null, token).then().assertThat().statusCode(OK.getStatusCode());
         UtilIT.deaccessionDataset(datasetId, "1.0", "dARK IT", null, token).then().assertThat().statusCode(OK.getStatusCode());
-        waitFor(datasetId, s -> s.equals("T"), 120, true);
+        given().post(BASE + "/refresh/" + datasetId).then().assertThat().statusCode(OK.getStatusCode());
+        assertEquals("P", waitFor(datasetId, s -> true, 30, false).getString("status"));
 
+        // destroy → T (the row survives the dataset, found by its ARK)
         UtilIT.destroyDataset(datasetId, token);
+        waitForArk(ark, "T", 120);
         UtilIT.deleteDataverse(alias, token);
+    }
+
+    /** Polls the assigned view by ARK (the dataset no longer exists) until the status matches, calling refresh. */
+    private static void waitForArk(String ark, String expected, int seconds) throws InterruptedException {
+        long deadline = System.currentTimeMillis() + seconds * 1000L;
+        String last = null;
+        while (System.currentTimeMillis() < deadline) {
+            given().post(BASE + "/refresh");
+            List<Map<String, Object>> items = given().queryParam("ark", ark).get(BASE).then().extract().jsonPath().getList("data.items");
+            if (items != null && !items.isEmpty()) {
+                last = (String) items.get(0).get("status");
+                if (expected.equals(last)) {
+                    return;
+                }
+            }
+            Thread.sleep(5000);
+        }
+        throw new AssertionError(ark + " did not reach dARK state " + expected + "; last=" + last);
     }
 
     /** Polls the assigned view of a dataset until its status matches (optionally calling refresh). */

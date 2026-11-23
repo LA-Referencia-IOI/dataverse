@@ -152,12 +152,12 @@ public class FinalizeDatasetPublicationCommand extends AbstractPublishDatasetCom
             // updating and/or registering the files, so it should not result in 
             // an extra performance hit. 
             theDataset.setEmbargoCitationDate(latestEmbargoDate);
-        }
+        } 
 
         DarkHooks.beforePublication(theDataset); // dARK: Other ID from the local table (no HTTP)
 
         DatasetVersion version = theDataset.getLatestVersion();
-
+        
         // Clear any external status
         CurationStatus status = version.getCurrentCurationStatus();
         if (status != null && Strings.isNotBlank(status.getLabel())) {
@@ -301,9 +301,8 @@ public class FinalizeDatasetPublicationCommand extends AbstractPublishDatasetCom
         });
         // Metadata export:
         ctxt.datasets().reExportDatasetAsync(dataset);
-
         DarkHooks.datasetPublished(getDataset()); // dARK: send metadata after commit
-
+        
         ctxt.index().asyncIndexDataset(dataset, true);
         
         //re-indexing dataverses that have additional subjects

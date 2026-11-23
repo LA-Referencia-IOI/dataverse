@@ -175,9 +175,8 @@ public class DestroyDatasetCommand extends AbstractVoidCommand {
     public boolean onSuccess(CommandContext ctxt, Object r) {
 
         boolean retVal = true;
-
-        DarkHooks.datasetDestroyed(doomed); // dARK: tombstone (also never-published drafts)
-
+        DarkHooks.datasetDestroyed(doomed); // dARK: tombstone (also never-published datasets)
+        
        // all the real Solr work is done here
        // delete orphaned Solr ids
         IndexResponse resultOfSolrDeletionAttempt = ctxt.solrIndex().deleteMultipleSolrIds(datasetAndFileSolrIdsToDelete);

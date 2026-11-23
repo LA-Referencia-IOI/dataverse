@@ -4,6 +4,7 @@ import edu.harvard.iq.dataverse.util.json.JsonUtil;
 import jakarta.json.JsonArray;
 import jakarta.json.JsonArrayBuilder;
 import jakarta.json.JsonObject;
+import jakarta.json.JsonString;
 import jakarta.json.JsonValue;
 import java.io.IOException;
 import java.net.URI;
@@ -11,13 +12,18 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
+import java.security.GeneralSecurityException;
+import java.time.Clock;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 import java.util.logging.Level;
 import java.util.logging.Logger;
+import java.util.regex.Pattern;
 
 /**
  * HTTP client for the dARK Minter API ({@code /api/v1}).
@@ -25,7 +31,16 @@ import java.util.logging.Logger;
  * Reservations always use {@code POST /arks/batch} (never {@code POST /arks}), which is
  * idempotent per {@code authority_id + naan + client_item_id}. A {@code 409} on
  * {@code PUT} means "metadata already being processed" and on {@code DELETE} "already
- * tombstoned"; both are returned as results, not thrown.
+ * tombstoned, or locked" (see {@link #tombstone}); both are returned as results, not thrown.
+ * <p>
+ * An ARK record this version cannot read (for example a state other than R/D/U/P/T) is an
+ * error of that ARK ({@link DarkException}, or a per-item error in the batch calls), never
+ * an unchecked exception.
+ * <p>
+ * Requests that modify data ({@code POST /arks/batch}, {@code PUT}, {@code DELETE}) are
+ * signed with this installation's key ({@link DarkSigner}); reads are not, as the Minter
+ * specifies. Every request carries the authority in {@code X-DARK-Authority-Id}. A signed
+ * request is sent once, to the exact URL that was signed: redirects are never followed.
  * <p>
  * This class performs blocking HTTP calls: never use it inside a command transaction.
  */
@@ -34,20 +49,79 @@ public class DarkClient {
     private static final Logger logger = Logger.getLogger(DarkClient.class.getCanonicalName());
 
     private static final int MAX_ERROR_LENGTH = 1000;
+    private static final Pattern ERROR_CODE = Pattern.compile("[A-Z][A-Z0-9_]{0,127}");
+    /** Error code of a signed request whose nonce the Minter had already admitted. */
+    private static final String REPLAY = "SIGNED_REQUEST_REPLAY";
+
+    /**
+     * One HTTP client for the application: it owns a connection pool and a selector thread.
+     * HTTP/1.1 because the Minter (FastAPI/uvicorn) does not speak h2c. The timeout is set on
+     * each request, and also covers the connection.
+     */
+    private static final HttpClient SHARED_HTTP = HttpClient.newBuilder()
+            .version(HttpClient.Version.HTTP_1_1)
+            .followRedirects(HttpClient.Redirect.NEVER)
+            .build();
+
+    private static final Breaker SHARED_BREAKER = new Breaker(Clock.systemUTC());
 
     private final DarkConfig config;
     private final HttpClient http;
+    private final Breaker breaker;
+
+    /**
+     * Circuit breaker: after {@link #FAILURES_TO_OPEN} consecutive calls that got no answer,
+     * or whose signature the Minter refused (401), calls fail at once for {@link #OPEN_FOR};
+     * then one call is tried again. Both problems affect every row alike, so a job with many
+     * rows neither waits a timeout per row nor sends a request per row that cannot succeed.
+     */
+    static final class Breaker {
+
+        static final int FAILURES_TO_OPEN = 3;
+        static final Duration OPEN_FOR = Duration.ofSeconds(60);
+
+        private final Clock clock;
+        private int failures;
+        private Instant openUntil = Instant.MIN;
+
+        Breaker(Clock clock) {
+            this.clock = clock;
+        }
+
+        synchronized void check() throws DarkException {
+            if (clock.instant().isBefore(openUntil)) {
+                throw new DarkException("Minter unreachable or refusing this installation's key; calls are paused until " + openUntil);
+            }
+        }
+
+        synchronized void succeeded() {
+            failures = 0;
+        }
+
+        synchronized void failed() {
+            if (++failures >= FAILURES_TO_OPEN) {
+                openUntil = clock.instant().plus(OPEN_FOR);
+            }
+        }
+    }
 
     /** Result of a batch reservation: one entry per accepted item plus per-item errors. */
     public record ReserveResult(List<DarkArkResponse> results, List<ItemError> errors) {
     }
 
     /** Per-item error of a batch call. */
-    public record ItemError(String clientItemId, int index, String error) {
+    public record ItemError(String clientItemId, String error) {
     }
 
     /** Result of a {@code PUT}: {@code alreadyInProgress} is true on {@code 409}, with {@code ark == null}. */
     public record PutResult(DarkArkResponse ark, boolean alreadyInProgress) {
+    }
+
+    /** {@code errorCode} of a {@link StatusResult} whose ARK record could not be read. */
+    public static final String INVALID_RESPONSE = "invalid_response";
+
+    /** The authority as registered in the Minter. */
+    public record AuthorityInfo(boolean active, List<String> naans) {
     }
 
     /** Status of one ARK: either {@code ark} or an error ({@code errorCode}, e.g. {@code not_found}). */
@@ -58,17 +132,13 @@ public class DarkClient {
     }
 
     public DarkClient(DarkConfig config) {
-        // HTTP/1.1: the Minter (FastAPI/uvicorn) does not speak h2c; avoids the upgrade attempt.
-        this(config, HttpClient.newBuilder()
-                .version(HttpClient.Version.HTTP_1_1)
-                .connectTimeout(Duration.ofSeconds(config.httpTimeoutSeconds()))
-                .followRedirects(HttpClient.Redirect.NORMAL)
-                .build());
+        this(config, SHARED_HTTP, SHARED_BREAKER);
     }
 
-    DarkClient(DarkConfig config, HttpClient http) {
+    DarkClient(DarkConfig config, HttpClient http, Breaker breaker) {
         this.config = config;
         this.http = http;
+        this.breaker = breaker;
     }
 
     /**
@@ -89,20 +159,24 @@ public class DarkClient {
                     .add("items", items)
                     .build();
 
-            HttpResponse<String> response = send(request("/arks/batch").POST(jsonBody(body)).build());
+            HttpResponse<String> response = send("POST", "/arks/batch", body, true);
             expectSuccess(response, "reserve batch");
             JsonObject json = parseObject(response.body());
 
             JsonArray res = json.containsKey("results") && !json.isNull("results") ? json.getJsonArray("results") : JsonValue.EMPTY_JSON_ARRAY;
             for (JsonValue v : res) {
-                results.add(DarkArkResponse.fromJson(v.asJsonObject()));
+                try {
+                    results.add(parseArk(v));
+                } catch (DarkException e) {
+                    String id = v.getValueType() == JsonValue.ValueType.OBJECT
+                            ? DarkArkResponse.string(v.asJsonObject(), "client_item_id") : null;
+                    errors.add(new ItemError(id, e.getMessage()));
+                }
             }
             if (json.containsKey("errors") && !json.isNull("errors")) {
                 for (JsonValue v : json.getJsonArray("errors")) {
                     JsonObject e = v.asJsonObject();
-                    int index = e.containsKey("index") && !e.isNull("index") ? e.getInt("index") + from : -1;
-                    errors.add(new ItemError(DarkArkResponse.string(e, "client_item_id"), index,
-                            DarkArkResponse.string(e, "error")));
+                    errors.add(new ItemError(DarkArkResponse.string(e, "client_item_id"), DarkArkResponse.string(e, "error")));
                 }
             }
         }
@@ -122,30 +196,30 @@ public class DarkClient {
                 .add("metadata_schema", metadataSchema)
                 .add("metadata_media_type", metadataMediaType)
                 .build();
-        HttpResponse<String> response = send(request(arkPath(ark)).PUT(jsonBody(body)).build());
-        if (response.statusCode() == 409) {
+        HttpResponse<String> response = send("PUT", arkPath(ark), body, true);
+        if (isBusinessConflict(response)) {
             logger.fine("dARK PUT " + ark + " returned 409: metadata already in progress");
             return new PutResult(null, true);
         }
         expectSuccess(response, "PUT " + ark);
-        return new PutResult(DarkArkResponse.fromJson(parseObject(response.body())), false);
+        return new PutResult(parseArk(parseObject(response.body())), false);
     }
 
     /** {@code GET /arks/{ark}}; throws with status 404 if the ARK does not exist. */
     public DarkArkResponse get(String ark) throws DarkException {
-        HttpResponse<String> response = send(request(arkPath(ark)).GET().build());
+        HttpResponse<String> response = send("GET", arkPath(ark), null, false);
         expectSuccess(response, "GET " + ark);
-        return DarkArkResponse.fromJson(parseObject(response.body()));
+        return parseArk(parseObject(response.body()));
     }
 
     /**
      * Tombstones an ARK ({@code DELETE /arks/{ark}}).
      *
-     * @return true if tombstoned now ({@code 204}), false if it already was ({@code 409}).
+     * @return true if tombstoned now ({@code 204}), false on {@code 409} (see {@link #tombstone}).
      */
     public boolean delete(String ark) throws DarkException {
-        HttpResponse<String> response = send(request(arkPath(ark)).DELETE().build());
-        if (response.statusCode() == 409) {
+        HttpResponse<String> response = send("DELETE", arkPath(ark), null, true);
+        if (isBusinessConflict(response)) {
             return false;
         }
         expectSuccess(response, "DELETE " + ark);
@@ -184,7 +258,7 @@ public class DarkClient {
             chunk.forEach(list::add);
             JsonObject body = JsonUtil.createObjectBuilder().add("arks", list).build();
 
-            HttpResponse<String> response = send(request("/arks/status/batch").POST(jsonBody(body)).build());
+            HttpResponse<String> response = send("POST", "/arks/status/batch", body, false);
             if (response.statusCode() == 404 || response.statusCode() == 405) {
                 logger.fine("dARK status/batch not available (HTTP " + response.statusCode() + "), falling back to GET");
                 for (String ark : chunk) {
@@ -201,7 +275,11 @@ public class DarkClient {
                 JsonObject r = v.asJsonObject();
                 String ark = DarkIds.normalizeArk(DarkArkResponse.string(r, "ark"));
                 if (r.containsKey("status") && !r.isNull("status")) {
-                    out.put(ark, new StatusResult(DarkArkResponse.fromJson(r.getJsonObject("status")), null, null));
+                    try {
+                        out.put(ark, new StatusResult(parseArk(r.get("status")), null, null));
+                    } catch (DarkException e) {
+                        out.put(ark, new StatusResult(null, INVALID_RESPONSE, e.getMessage()));
+                    }
                 } else if (r.containsKey("error") && !r.isNull("error")) {
                     JsonObject e = r.getJsonObject("error");
                     out.put(ark, new StatusResult(null, DarkArkResponse.string(e, "code"), DarkArkResponse.string(e, "message")));
@@ -209,6 +287,22 @@ public class DarkClient {
             }
         }
         return out;
+    }
+
+    /**
+     * What the Minter knows about this installation's authority ({@code GET /authority/{uuid}}).
+     * It does not include the registered key: only a signed request proves that the key is accepted.
+     */
+    public AuthorityInfo authority() throws DarkException {
+        HttpResponse<String> response = send("GET", "/authority/" + config.authorityId(), null, false);
+        expectSuccess(response, "GET authority");
+        JsonObject json = parseObject(response.body());
+        List<String> naans = new ArrayList<>();
+        if (json.containsKey("naans") && json.get("naans").getValueType() == JsonValue.ValueType.ARRAY) {
+            json.getJsonArray("naans").forEach(naan -> naans.add(naan.getValueType() == JsonValue.ValueType.STRING
+                    ? ((JsonString) naan).getString() : naan.toString()));
+        }
+        return new AuthorityInfo(json.getBoolean("active", false), naans);
     }
 
     private StatusResult statusByGet(String ark) {
@@ -230,28 +324,30 @@ public class DarkClient {
         return "/arks/" + compact;
     }
 
-    private HttpRequest.Builder request(String path) {
-        HttpRequest.Builder b = HttpRequest.newBuilder(URI.create(config.minterUrl() + path))
+    /**
+     * Sends one request. The JSON body is serialized once: the same bytes are signed and sent.
+     *
+     * @param signed true for a request that modifies data
+     */
+    private HttpResponse<String> send(String method, String path, JsonObject json, boolean signed) throws DarkException {
+        breaker.check();
+        URI uri = URI.create(config.minterUrl() + path);
+        byte[] body = json == null ? new byte[0] : json.toString().getBytes(StandardCharsets.UTF_8);
+        HttpRequest.Builder request = HttpRequest.newBuilder(uri)
                 .timeout(Duration.ofSeconds(config.httpTimeoutSeconds()))
                 .header("Accept", "application/json")
-                .header("Content-Type", "application/json");
-        if (config.authorityHeaderEnabled() && config.authorityId() != null) {
-            b.header(config.authorityHeader(), config.authorityId());
+                .header("Content-Type", "application/json")
+                .method(method, body.length == 0 ? HttpRequest.BodyPublishers.noBody() : HttpRequest.BodyPublishers.ofByteArray(body));
+        if (signed) {
+            signatureHeaders(method, uri, body).forEach(request::header);
+        } else {
+            request.header(DarkSigner.AUTHORITY_HEADER, config.authorityId());
         }
-        if (config.apiToken() != null && !config.apiToken().isBlank()) {
-            b.header("Authorization", "Bearer " + config.apiToken());
-        }
-        return b;
-    }
-
-    private static HttpRequest.BodyPublisher jsonBody(JsonObject body) {
-        return HttpRequest.BodyPublishers.ofString(body.toString(), StandardCharsets.UTF_8);
-    }
-
-    private HttpResponse<String> send(HttpRequest request) throws DarkException {
+        HttpResponse<String> response;
         try {
-            return http.send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+            response = http.send(request.build(), HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
         } catch (IOException e) {
+            breaker.failed();
             logger.log(Level.FINE, "dARK Minter unreachable", e);
             throw new DarkException("Minter unreachable: " + e.getClass().getSimpleName()
                     + (e.getMessage() != null ? " " + e.getMessage() : ""), e);
@@ -259,6 +355,44 @@ public class DarkClient {
             Thread.currentThread().interrupt();
             throw new DarkException("Interrupted while calling the Minter", e);
         }
+        int status = response.statusCode();
+        if (status == 401) {
+            breaker.failed();
+        } else {
+            breaker.succeeded();
+        }
+        if (status >= 300 && status < 400) {
+            throw new DarkException("Unexpected redirect; correct dataverse.dark.minter-url instead of following it", status);
+        }
+        return response;
+    }
+
+    /** The key is read on every signed request, so a replaced or damaged key is noticed at once. */
+    private Map<String, String> signatureHeaders(String method, URI uri, byte[] body) throws DarkException {
+        if (config.keyPath() == null) {
+            throw new DarkException("dataverse.dark.key-directory is missing");
+        }
+        DarkKeyStore.Credential key = DarkKeyStore.load(config.keyPath());
+        try {
+            return DarkSigner.headers(key.privateKey(), key.keyId(), method, uri, config.authorityId(), body,
+                    Instant.now().getEpochSecond(), UUID.randomUUID());
+        } catch (GeneralSecurityException | IllegalArgumentException e) {
+            throw new DarkException("Could not sign the request: " + e.getMessage());
+        }
+    }
+
+    /**
+     * A 409 means "the Minter is busy with this ARK" (metadata in progress, locked, already
+     * tombstoned), except when it reports that this very signed request was already admitted.
+     */
+    private static boolean isBusinessConflict(HttpResponse<String> response) {
+        return response.statusCode() == 409 && !REPLAY.equals(errorCode(response));
+    }
+
+    /** {@code X-DARK-Error-Code} of a response, only if it has the shape of a code. */
+    private static String errorCode(HttpResponse<String> response) {
+        String code = response.headers().firstValue(DarkSigner.ERROR_CODE_HEADER).orElse("");
+        return ERROR_CODE.matcher(code).matches() ? code : null;
     }
 
     private static void expectSuccess(HttpResponse<String> response, String operation) throws DarkException {
@@ -266,7 +400,13 @@ public class DarkClient {
         if (status >= 200 && status < 300) {
             return;
         }
-        throw new DarkException(errorMessage(response.body(), operation), status);
+        // An authentication or permission answer may come from a gateway: only its code is kept.
+        // Any other error keeps the Minter's explanation, e.g. which metadata field is invalid.
+        String code = errorCode(response);
+        String detail = status == 401 || status == 403 ? null : errorMessage(response.body(), operation);
+        String message = code == null ? (detail == null ? operation + " not authorized" : detail)
+                : (detail == null || detail.equals(code) ? code : code + ": " + detail);
+        throw new DarkException(message, status);
     }
 
     /** Extracts FastAPI's {@code detail} (string or validation list) or falls back to the raw body. */
@@ -305,6 +445,18 @@ public class DarkClient {
             msg = operation + " failed";
         }
         return msg.length() > MAX_ERROR_LENGTH ? msg.substring(0, MAX_ERROR_LENGTH) : msg;
+    }
+
+    /** Reads an ARK record; one that is not an object or has an unknown state is a {@link DarkException}. */
+    private static DarkArkResponse parseArk(JsonValue record) throws DarkException {
+        if (record == null || record.getValueType() != JsonValue.ValueType.OBJECT) {
+            throw new DarkException("Unexpected ARK record from the Minter: " + record);
+        }
+        try {
+            return DarkArkResponse.fromJson(record.asJsonObject());
+        } catch (IllegalArgumentException e) {
+            throw new DarkException("Unexpected ARK record from the Minter: " + e.getMessage(), e);
+        }
     }
 
     private static JsonObject parseObject(String body) throws DarkException {

@@ -201,7 +201,7 @@ public abstract class AbstractCreateDatasetCommand extends AbstractDatasetComman
 
     @Override
     public boolean onSuccess(CommandContext ctxt, Object r) {
-        DarkHooks.datasetCreated(getDataset()); // dARK: 
+        DarkHooks.datasetCreated(getDataset()); // dARK: reserve an ARK after commit
         return true;
     }
 

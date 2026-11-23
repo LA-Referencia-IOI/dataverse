@@ -2,10 +2,10 @@ package edu.harvard.iq.dataverse.dark;
 
 import edu.harvard.iq.dataverse.DataverseSession;
 import edu.harvard.iq.dataverse.PermissionsWrapper;
-import edu.harvard.iq.dataverse.dark.DarkServiceBean.AssignedQuery;
-import edu.harvard.iq.dataverse.dark.DarkServiceBean.AssignedRow;
-import edu.harvard.iq.dataverse.dark.DarkServiceBean.MissingRow;
-import edu.harvard.iq.dataverse.dark.DarkServiceBean.Page;
+import edu.harvard.iq.dataverse.dark.DarkReportBean.AssignedQuery;
+import edu.harvard.iq.dataverse.dark.DarkReportBean.AssignedRow;
+import edu.harvard.iq.dataverse.dark.DarkReportBean.MissingRow;
+import edu.harvard.iq.dataverse.dark.DarkReportBean.Page;
 import edu.harvard.iq.dataverse.util.BundleUtil;
 import edu.harvard.iq.dataverse.util.JsfHelper;
 import jakarta.ejb.EJB;
@@ -23,13 +23,14 @@ import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.util.List;
 import java.util.Map;
+import java.util.TimeZone;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
 /**
  * Backing bean of {@code dashboard-dark.xhtml}: superuser dashboard of the dARK
  * integration (same data as {@code GET /api/admin/dark}, without going through the
- * localhost-only admin API).
+ * admin API).
  */
 @ViewScoped
 @Named("DarkDashboardPage")
@@ -45,6 +46,8 @@ public class DarkDashboardPage implements Serializable {
     PermissionsWrapper permissionsWrapper;
     @EJB
     DarkServiceBean darkService;
+    @EJB
+    DarkReportBean darkReport;
 
     private String view = "assigned";
     private String arkFilter;
@@ -66,13 +69,13 @@ public class DarkDashboardPage implements Serializable {
     }
 
     private void load() {
-        counts = darkService.countsJson().build();
+        counts = darkReport.counts();
         if (isMissingView()) {
-            missing = darkService.listMissing(datasetIdFilter, page, PAGE_SIZE);
+            missing = darkReport.listMissing(datasetIdFilter, page, PAGE_SIZE);
             assigned = null;
         } else {
             DarkState state = statusFilter == null || statusFilter.isBlank() ? null : DarkState.fromCode(statusFilter);
-            assigned = darkService.listAssigned(new AssignedQuery(arkFilter, state, datasetIdFilter, errorsOnly, "updatedAt", false),
+            assigned = darkReport.listAssigned(new AssignedQuery(arkFilter, state, datasetIdFilter, errorsOnly, "updatedAt", false),
                     page, PAGE_SIZE);
             missing = null;
         }
@@ -132,23 +135,24 @@ public class DarkDashboardPage implements Serializable {
     }
 
     public void assignAll() {
-        DarkJob job = DarkJob.tryStart("assign-all");
-        if (job == null) {
-            JsfHelper.addWarningMessage(BundleUtil.getStringFromBundle("dashboard.dark.job.running"));
-            return;
-        }
-        darkService.assignAllAsync(job, 0);
-        JsfHelper.addSuccessMessage(BundleUtil.getStringFromBundle("dashboard.dark.job.started", List.of(job.getName())));
+        startJob(() -> darkService.startAssignAll(0));
     }
 
     public void runRefresh() {
-        DarkJob job = DarkJob.tryStart("refresh");
-        if (job == null) {
-            JsfHelper.addWarningMessage(BundleUtil.getStringFromBundle("dashboard.dark.job.running"));
-            return;
+        startJob(darkService::startRefresh);
+    }
+
+    private void startJob(DarkCall<DarkJob> start) {
+        try {
+            DarkJob job = start.call();
+            if (job == null) {
+                JsfHelper.addWarningMessage(BundleUtil.getStringFromBundle("dashboard.dark.job.running"));
+            } else {
+                JsfHelper.addSuccessMessage(BundleUtil.getStringFromBundle("dashboard.dark.job.started", List.of(job.getName())));
+            }
+        } catch (DarkException e) {
+            JsfHelper.addErrorMessage(BundleUtil.getStringFromBundle("dashboard.dark.action.failed", List.of(e.getMessage())));
         }
-        darkService.refreshAllAsync(job);
-        JsfHelper.addSuccessMessage(BundleUtil.getStringFromBundle("dashboard.dark.job.started", List.of(job.getName())));
     }
 
     /** Streams the CSV of the "assigned" view with the current filters. */
@@ -157,7 +161,7 @@ public class DarkDashboardPage implements Serializable {
         ExternalContext ec = fc.getExternalContext();
         try {
             DarkState state = statusFilter == null || statusFilter.isBlank() ? null : DarkState.fromCode(statusFilter);
-            List<AssignedRow> rows = darkService.exportAssigned(
+            List<AssignedRow> rows = darkReport.exportAssigned(
                     new AssignedQuery(arkFilter, state, datasetIdFilter, errorsOnly, "updatedAt", false));
             byte[] csv = DarkCsv.toCsv(rows).getBytes(StandardCharsets.UTF_8);
             ec.responseReset();
@@ -174,13 +178,13 @@ public class DarkDashboardPage implements Serializable {
         }
     }
 
-    private interface DarkAction {
-        JsonObject run() throws DarkException;
+    private interface DarkCall<T> {
+        T call() throws DarkException;
     }
 
-    private void runAction(DarkAction action) {
+    private void runAction(DarkCall<JsonObject> action) {
         try {
-            JsonObject result = action.run();
+            JsonObject result = action.call();
             String status = result.containsKey("status") ? result.getString("status") : "";
             JsfHelper.addSuccessMessage(BundleUtil.getStringFromBundle("dashboard.dark.action.done",
                     List.of(result.getString("ark", "") + " " + stateLabel(status))));
@@ -218,8 +222,14 @@ public class DarkDashboardPage implements Serializable {
         return state == null ? "" : stateLabel(String.valueOf(state.getCode()));
     }
 
+    /** Date and time in UTC, labelled as such: the same instant the API and the CSV return. */
     public String format(Date date) {
-        return date == null ? "" : new SimpleDateFormat("yyyy-MM-dd HH:mm").format(date);
+        if (date == null) {
+            return "";
+        }
+        SimpleDateFormat utc = new SimpleDateFormat("yyyy-MM-dd HH:mm 'UTC'");
+        utc.setTimeZone(TimeZone.getTimeZone("UTC"));
+        return utc.format(date);
     }
 
     public String getLastJob() {

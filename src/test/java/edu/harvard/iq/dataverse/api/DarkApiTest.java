@@ -1,7 +1,8 @@
 package edu.harvard.iq.dataverse.api;
 
-import edu.harvard.iq.dataverse.dark.DarkServiceBean.AssignedQuery;
-import edu.harvard.iq.dataverse.dark.DarkServiceBean.AssignedRow;
+import edu.harvard.iq.dataverse.dark.DarkCsv;
+import edu.harvard.iq.dataverse.dark.DarkReportBean.AssignedQuery;
+import edu.harvard.iq.dataverse.dark.DarkReportBean.AssignedRow;
 import edu.harvard.iq.dataverse.dark.DarkState;
 import java.sql.Timestamp;
 import java.time.Instant;
@@ -44,7 +45,7 @@ class DarkApiTest {
         AssignedRow row = new AssignedRow(1L, "ark:12345/abc", 7L, "doi:10.5072/FK2/ABC", "Title, with comma",
                 DarkState.PUBLISHED, "https://doi.org/10.5072/fk2/abc", "1.0", 0, false, null, t, t);
 
-        String csv = Dark.toCsv(List.of(row));
+        String csv = DarkCsv.toCsv(List.of(row));
         String[] lines = csv.split("\r\n");
 
         assertEquals("ark,datasetId,persistentId,title,status,target,sentVersion,attempts,stuck,lastError,createdAt,updatedAt", lines[0]);

@@ -1,5 +1,21 @@
 package edu.harvard.iq.dataverse.dark;
 
+import java.nio.file.Files;
+import java.nio.file.attribute.PosixFilePermissions;
+import java.security.KeyFactory;
+import java.security.Signature;
+import java.security.spec.X509EncodedKeySpec;
+import java.util.Base64;
+import java.util.HexFormat;
+import java.util.UUID;
+import java.nio.file.Path;
+import org.junit.jupiter.api.io.TempDir;
+import java.net.http.HttpClient;
+import java.time.Clock;
+import java.time.Duration;
+import java.time.Instant;
+import java.time.ZoneId;
+import java.time.ZoneOffset;
 import edu.harvard.iq.dataverse.util.json.JsonUtil;
 import jakarta.json.JsonObject;
 import java.io.BufferedInputStream;
@@ -43,7 +59,10 @@ class DarkClientTest {
     }
 
     /** A canned response. */
-    record Resp(int status, String body) {
+    record Resp(int status, String body, Map<String, String> headers) {
+        Resp(int status, String body) {
+            this(status, body, Map.of());
+        }
     }
 
     interface Handler {
@@ -54,6 +73,18 @@ class DarkClientTest {
     private final List<Req> requests = new CopyOnWriteArrayList<>();
     private final Map<String, Handler> handlers = new ConcurrentHashMap<>();
     private String baseUrl;
+
+    @TempDir
+    Path root;
+    /** Directory of the key the client signs with. */
+    private Path keys;
+    private DarkKeyStore.Credential key;
+
+    @BeforeEach
+    void generateKey() throws DarkException {
+        keys = root.resolve("keys").resolve("dark");
+        key = DarkKeyStore.generate(keys, false);
+    }
 
     @BeforeEach
     void startServer() throws IOException {
@@ -114,6 +145,7 @@ class DarkClientTest {
         if (resp.status() != 204) {
             head.append("Content-Type: application/json\r\n").append("Content-Length: ").append(bytes.length).append("\r\n");
         }
+        resp.headers().forEach((name, value) -> head.append(name).append(": ").append(value).append("\r\n"));
         head.append("\r\n");
         OutputStream out = socket.getOutputStream();
         out.write(head.toString().getBytes(StandardCharsets.US_ASCII));
@@ -132,13 +164,18 @@ class DarkClientTest {
         return b == -1 && buf.size() == 0 ? null : buf.toString(StandardCharsets.US_ASCII);
     }
 
-    private DarkClient client(int batchSize, boolean authHeader, String token) {
-        return new DarkClient(new DarkConfig(true, baseUrl, "auth-uuid", "12345", token, authHeader,
-                "X-Authority-Id", batchSize, "dARK", DarkConfig.Target.PID, 20, 5, true, null));
+    private DarkClient client(int batchSize) {
+        return new DarkClient(config(batchSize), HttpClient.newBuilder().version(HttpClient.Version.HTTP_1_1).build(),
+                new DarkClient.Breaker(Clock.systemUTC()));
+    }
+
+    private DarkConfig config(int batchSize) {
+        return new DarkConfig(true, baseUrl, "auth-uuid", "12345", keys.toString(), false, batchSize, "dARK",
+                DarkConfig.Target.PID, 20, 5, null);
     }
 
     private DarkClient client() {
-        return client(100, true, null);
+        return client(100);
     }
 
     private static String arkJson(String ark, String state) {
@@ -174,13 +211,12 @@ class DarkClientTest {
         Req sent = requests.get(0);
         assertEquals("auth-uuid", sent.json().getString("authority_id"));
         assertEquals("12345", sent.json().getString("naan"));
-        assertEquals("auth-uuid", sent.headers().get("x-authority-id"));
+        assertEquals("auth-uuid", sent.headers().get("x-dark-authority-id"));
         assertEquals("application/json", sent.headers().get("content-type"));
-        assertNull(sent.headers().get("authorization"));
     }
 
     @Test
-    void reserveBatchSplitsInChunksAndOffsetsErrorIndexes() throws Exception {
+    void reserveBatchSplitsInChunks() throws Exception {
         handlers.put("POST /api/v1/arks/batch", req -> {
             var items = req.json().getJsonArray("items");
             var results = JsonUtil.createArrayBuilder();
@@ -194,12 +230,11 @@ class DarkClientTest {
         });
 
         List<String> ids = IntStream.range(0, 5).mapToObj(i -> "doi:10.5072/fk2/" + i).toList();
-        DarkClient.ReserveResult r = client(2, true, null).reserveBatch(ids);
+        DarkClient.ReserveResult r = client(2).reserveBatch(ids);
 
         assertEquals(3, requests.size(), "5 items in chunks of 2");
         assertEquals(2, r.results().size());
         assertEquals(3, r.errors().size());
-        assertEquals(List.of(0, 2, 4), r.errors().stream().map(DarkClient.ItemError::index).toList());
         assertEquals("doi:10.5072/fk2/2", r.errors().get(1).clientItemId());
     }
 
@@ -218,7 +253,7 @@ class DarkClientTest {
         handlers.put("PUT /api/v1/arks/ark:12345/abc", req -> new Resp(200, arkJson("ark:/12345/abc", "D")));
 
         JsonObject l1 = JsonUtil.createObjectBuilder().add("ark", "ark:12345/abc").add("title", "T").build();
-        DarkClient.PutResult r = client(100, true, "tok").put("ark:/12345/abc", "https://doi.org/10.5072/fk2/abc",
+        DarkClient.PutResult r = client().put("ark:/12345/abc", "https://doi.org/10.5072/fk2/abc",
                 l1, "<resource/>", "oai_datacite", "application/xml");
 
         assertFalse(r.alreadyInProgress());
@@ -235,7 +270,6 @@ class DarkClientTest {
         assertEquals("<resource/>", body.getString("original_metadata"));
         assertEquals("oai_datacite", body.getString("metadata_schema"));
         assertEquals("application/xml", body.getString("metadata_media_type"));
-        assertEquals("Bearer tok", sent.headers().get("authorization"));
     }
 
     @Test
@@ -323,13 +357,6 @@ class DarkClientTest {
         assertEquals(503, e.getHttpStatus());
     }
 
-    @Test
-    void authorityHeaderCanBeDisabled() throws Exception {
-        handlers.put("GET *", req -> new Resp(200, arkJson("ark:/12345/abc", "P")));
-        client(100, false, null).get("ark:12345/abc");
-        assertNull(requests.get(0).headers().get("x-authority-id"));
-    }
-
     // ---- status batch ----
 
     @Test
@@ -359,6 +386,326 @@ class DarkClientTest {
         List<String> calls = new ArrayList<>();
         requests.forEach(q -> calls.add(q.method() + " " + q.path()));
         assertEquals(List.of("POST /api/v1/arks/status/batch", "GET /api/v1/arks/ark:12345/a", "GET /api/v1/arks/ark:12345/b"), calls);
+    }
+
+    // ---- ARK records this version cannot read ----
+
+    @Test
+    void putWithUnknownStateIsAnErrorNotACrash() {
+        handlers.put("PUT *", req -> new Resp(200, arkJson("ark:/12345/a", "X")));
+        DarkException e = assertThrows(DarkException.class, () -> client().put("ark:12345/a", "https://doi.org/10.5072/fk2/a",
+                JsonUtil.createObjectBuilder().add("ark", "ark:12345/a").build(), "<xml/>", "oai_datacite", "application/xml"));
+        assertEquals("Unexpected ARK record from the Minter: Unknown dARK state: X", e.toLastError());
+    }
+
+    @Test
+    void getWithUnknownStateIsAnErrorNotACrash() {
+        handlers.put("GET *", req -> new Resp(200, arkJson("ark:/12345/a", "X")));
+        DarkException e = assertThrows(DarkException.class, () -> client().get("ark:12345/a"));
+        assertTrue(e.getMessage().contains("Unknown dARK state: X"), e.getMessage());
+    }
+
+    @Test
+    void statusBatchUnknownStateOnlyAffectsThatArk() throws Exception {
+        handlers.put("POST /api/v1/arks/status/batch", req -> new Resp(200, "{\"results\":["
+                + "{\"ark\":\"ark:/12345/a\",\"status\":" + arkJson("ark:/12345/a", "X") + "},"
+                + "{\"ark\":\"ark:/12345/b\",\"status\":\"P\"},"
+                + "{\"ark\":\"ark:/12345/c\",\"status\":" + arkJson("ark:/12345/c", "P") + "}"
+                + "]}"));
+
+        Map<String, DarkClient.StatusResult> r = client().statusBatch(List.of("ark:12345/a", "ark:12345/b", "ark:12345/c"));
+
+        assertTrue(r.get("ark:12345/a").isError());
+        assertEquals(DarkClient.INVALID_RESPONSE, r.get("ark:12345/a").errorCode());
+        assertTrue(r.get("ark:12345/a").errorMessage().contains("Unknown dARK state: X"));
+        assertEquals(DarkClient.INVALID_RESPONSE, r.get("ark:12345/b").errorCode(), "a status that is not an object");
+        assertEquals(DarkState.PUBLISHED, r.get("ark:12345/c").ark().state(), "the other ARKs are not affected");
+    }
+
+    @Test
+    void statusByGetUnknownStateIsAnErrorOfThatArk() throws Exception {
+        // No handler for status/batch -> 404 -> one GET per ARK
+        handlers.put("GET /api/v1/arks/ark:12345/a", req -> new Resp(200, arkJson("ark:/12345/a", "X")));
+        handlers.put("GET /api/v1/arks/ark:12345/b", req -> new Resp(200, arkJson("ark:/12345/b", "D")));
+
+        Map<String, DarkClient.StatusResult> r = client().statusBatch(List.of("ark:12345/a", "ark:12345/b"));
+
+        assertTrue(r.get("ark:12345/a").isError());
+        assertTrue(r.get("ark:12345/a").errorMessage().contains("Unknown dARK state: X"));
+        assertEquals(DarkState.DRAFT, r.get("ark:12345/b").ark().state());
+    }
+
+    @Test
+    void reserveBatchUnknownStateIsAnItemError() throws Exception {
+        handlers.put("POST /api/v1/arks/batch", req -> new Resp(200, "{\"results\":["
+                + "{\"ark\":\"ark:/12345/a\",\"state\":\"X\",\"client_item_id\":\"doi:10.5072/fk2/a\"},"
+                + "{\"ark\":\"ark:/12345/b\",\"state\":\"R\",\"client_item_id\":\"doi:10.5072/fk2/b\"}"
+                + "],\"errors\":null}"));
+
+        DarkClient.ReserveResult r = client().reserveBatch(List.of("doi:10.5072/fk2/a", "doi:10.5072/fk2/b"));
+
+        assertEquals(1, r.results().size());
+        assertEquals("ark:12345/b", r.results().get(0).ark());
+        assertEquals(1, r.errors().size());
+        assertEquals("doi:10.5072/fk2/a", r.errors().get(0).clientItemId());
+        assertTrue(r.errors().get(0).error().contains("Unknown dARK state: X"));
+    }
+
+    // ---- DARK2 signature ----
+
+    private static final JsonObject LEVEL1 = JsonUtil.createObjectBuilder().add("title", "Título con ñ").build();
+
+    private DarkClient.PutResult put(DarkClient client) throws DarkException {
+        return client.put("ark:12345/abc", "https://doi.org/10.5072/fk2/abc", LEVEL1, "<xml/>", "oai_datacite", "application/xml");
+    }
+
+    /** Verifies the signature of a recorded request with the public half of the client's key. */
+    private boolean signatureIsValid(Req req) throws Exception {
+        Map<String, String> h = req.headers();
+        String message = String.join("\n", "DARK2", req.method(), req.path(), h.get("x-dark-authority-id"), h.get("x-dark-key-id"),
+                h.get("x-dark-timestamp"), h.get("x-dark-nonce"), h.get("x-dark-content-sha256"));
+        byte[] spki = HexFormat.of().parseHex("302a300506032b6570032100" + HexFormat.of().formatHex(Base64.getDecoder().decode(key.publicKey())));
+        Signature verifier = Signature.getInstance("Ed25519");
+        verifier.initVerify(KeyFactory.getInstance("Ed25519").generatePublic(new X509EncodedKeySpec(spki)));
+        verifier.update(message.getBytes(StandardCharsets.UTF_8));
+        return verifier.verify(Base64.getDecoder().decode(h.get("x-dark-signature")));
+    }
+
+    @Test
+    void aWriteIsSignedOverTheExactBytesSent() throws Exception {
+        handlers.put("PUT *", req -> new Resp(200, arkJson("ark:/12345/abc", "D")));
+
+        put(client());
+
+        Req sent = requests.get(0);
+        assertEquals("/api/v1/arks/ark:12345/abc", sent.path());
+        assertEquals("auth-uuid", sent.headers().get("x-dark-authority-id"));
+        assertEquals(key.keyId(), sent.headers().get("x-dark-key-id"));
+        assertEquals(DarkSigner.sha256Hex(sent.body().getBytes(StandardCharsets.UTF_8)), sent.headers().get("x-dark-content-sha256"),
+                "digest of the body as received, non-ASCII included");
+        long skew = Math.abs(Instant.now().getEpochSecond() - Long.parseLong(sent.headers().get("x-dark-timestamp")));
+        assertTrue(skew < 60, "current Unix seconds");
+        assertEquals(sent.headers().get("x-dark-nonce"), UUID.fromString(sent.headers().get("x-dark-nonce")).toString());
+        assertTrue(signatureIsValid(sent));
+    }
+
+    @Test
+    void everyWriteIsSigned() throws Exception {
+        handlers.put("POST /api/v1/arks/batch", req -> new Resp(200, "{\"results\":[],\"errors\":null}"));
+        handlers.put("PUT *", req -> new Resp(200, arkJson("ark:/12345/abc", "D")));
+        handlers.put("DELETE *", req -> new Resp(204, null));
+        DarkClient client = client();
+
+        client.reserveBatch(List.of("doi:10.5072/fk2/a"));
+        put(client);
+        client.delete("ark:12345/abc");
+
+        assertEquals(List.of("POST", "PUT", "DELETE"), requests.stream().map(Req::method).toList());
+        for (Req sent : requests) {
+            assertTrue(signatureIsValid(sent), sent.method());
+        }
+        assertEquals("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                requests.get(2).headers().get("x-dark-content-sha256"), "a DELETE has no body");
+        assertEquals(3, requests.stream().map(r -> r.headers().get("x-dark-nonce")).distinct().count(), "a new nonce per request");
+    }
+
+    @Test
+    void readsCarryTheAuthorityButNoSignature() throws Exception {
+        handlers.put("GET *", req -> new Resp(200, arkJson("ark:/12345/abc", "P")));
+        handlers.put("POST /api/v1/arks/status/batch", req -> new Resp(200, "{\"results\":[]}"));
+        DarkClient client = client();
+
+        client.get("ark:12345/abc");
+        client.statusBatch(List.of("ark:12345/abc"));
+
+        for (Req sent : requests) {
+            assertEquals("auth-uuid", sent.headers().get("x-dark-authority-id"), sent.method());
+            assertNull(sent.headers().get("x-dark-signature"), sent.method());
+            assertNull(sent.headers().get("x-dark-nonce"), sent.method());
+        }
+    }
+
+    @Test
+    void readsWorkWithoutAKey() throws Exception {
+        Files.delete(keys.resolve("private.pk8"));
+        handlers.put("GET *", req -> new Resp(200, arkJson("ark:/12345/abc", "P")));
+        assertEquals(DarkState.PUBLISHED, client().get("ark:12345/abc").state());
+    }
+
+    @Test
+    void aWriteWithoutAUsableKeyIsNeverSent() throws Exception {
+        Files.setPosixFilePermissions(keys.resolve("private.pk8"), PosixFilePermissions.fromString("rw-r--r--"));
+
+        DarkException e = assertThrows(DarkException.class, () -> put(client()));
+
+        assertTrue(e.getMessage().contains("cannot be used"), e.getMessage());
+        assertFalse(e.isRejection());
+        assertTrue(requests.isEmpty(), "nothing leaves unsigned");
+    }
+
+    @Test
+    void aRedirectIsNotFollowed() {
+        handlers.put("PUT *", req -> new Resp(307, "", Map.of("Location", baseUrl + "/elsewhere")));
+
+        DarkException e = assertThrows(DarkException.class, () -> put(client()));
+
+        assertEquals(307, e.getHttpStatus());
+        assertEquals(1, requests.size());
+    }
+
+    @Test
+    void aRefusedSignatureKeepsOnlyTheErrorCode() {
+        handlers.put("PUT *", req -> new Resp(401, "{\"detail\":\"gateway said something\"}",
+                Map.of("X-DARK-Error-Code", "SIGNED_AUTH_KEY_INVALID")));
+
+        DarkException e = assertThrows(DarkException.class, () -> put(client()));
+
+        assertEquals("HTTP 401: SIGNED_AUTH_KEY_INVALID", e.toLastError());
+        assertTrue(e.isAuthenticationFailure());
+        assertFalse(e.isRejection(), "it is not about this row");
+    }
+
+    @Test
+    void anUnauthorizedAnswerWithoutACodeDoesNotEchoItsBody() {
+        handlers.put("PUT *", req -> new Resp(401, "{\"detail\":\"gateway said something\"}", Map.of("X-DARK-Error-Code", "not a code")));
+
+        DarkException e = assertThrows(DarkException.class, () -> put(client()));
+
+        assertEquals("HTTP 401: PUT ark:12345/abc not authorized", e.toLastError());
+    }
+
+    @Test
+    void aPermissionErrorIsARejectionOfThatRequest() {
+        handlers.put("PUT *", req -> new Resp(403, "{\"detail\":\"AUTHORITY_MISMATCH\"}", Map.of("X-DARK-Error-Code", "AUTHORITY_MISMATCH")));
+
+        DarkException e = assertThrows(DarkException.class, () -> put(client()));
+
+        assertEquals("HTTP 403: AUTHORITY_MISMATCH", e.toLastError());
+        assertTrue(e.isRejection());
+        assertFalse(e.isAuthenticationFailure());
+    }
+
+    @Test
+    void otherErrorsKeepTheCodeAndTheExplanation() {
+        handlers.put("PUT *", req -> new Resp(503, "{\"detail\":\"registry down\"}", Map.of("X-DARK-Error-Code", "AUTH_REGISTRY_UNAVAILABLE")));
+
+        DarkException e = assertThrows(DarkException.class, () -> put(client()));
+
+        assertEquals("HTTP 503: AUTH_REGISTRY_UNAVAILABLE: registry down", e.toLastError());
+        assertFalse(e.isRejection());
+    }
+
+    @Test
+    void aReplayIsAnErrorNotMetadataInProgress() {
+        handlers.put("PUT *", req -> new Resp(409, "{\"detail\":\"SIGNED_REQUEST_REPLAY\"}", Map.of("X-DARK-Error-Code", "SIGNED_REQUEST_REPLAY")));
+        handlers.put("DELETE *", req -> new Resp(409, "{\"detail\":\"SIGNED_REQUEST_REPLAY\"}", Map.of("X-DARK-Error-Code", "SIGNED_REQUEST_REPLAY")));
+
+        assertEquals("HTTP 409: SIGNED_REQUEST_REPLAY", assertThrows(DarkException.class, () -> put(client())).toLastError());
+        assertEquals(409, assertThrows(DarkException.class, () -> client().delete("ark:12345/abc")).getHttpStatus());
+    }
+
+    @Test
+    void refusedSignaturesPauseTheCalls() {
+        handlers.put("PUT *", req -> new Resp(401, "", Map.of("X-DARK-Error-Code", "SIGNED_AUTH_KEY_INVALID")));
+        DarkClient client = client();
+
+        for (int i = 0; i < DarkClient.Breaker.FAILURES_TO_OPEN; i++) {
+            assertTrue(assertThrows(DarkException.class, () -> put(client)).isAuthenticationFailure());
+        }
+        DarkException paused = assertThrows(DarkException.class, () -> put(client));
+
+        assertTrue(paused.getMessage().contains("paused until"), paused.getMessage());
+        assertEquals(DarkClient.Breaker.FAILURES_TO_OPEN, requests.size(), "the paused call was not sent");
+    }
+
+    @Test
+    void authorityReportsWhetherItIsActiveAndItsNaans() throws Exception {
+        handlers.put("GET /api/v1/authority/auth-uuid", req -> new Resp(200,
+                "{\"uuid\":\"auth-uuid\",\"wallet_address\":\"0xabc\",\"naans\":[\"12345\",\"99999\"],\"active\":true}"));
+
+        DarkClient.AuthorityInfo authority = client().authority();
+
+        assertTrue(authority.active());
+        assertEquals(List.of("12345", "99999"), authority.naans());
+        assertNull(requests.get(0).headers().get("x-dark-signature"));
+    }
+
+    // ---- circuit breaker ----
+
+    /** A clock the test moves by hand. */
+    private static final class ManualClock extends Clock {
+        private Instant now = Instant.parse("2026-01-01T00:00:00Z");
+
+        void advance(Duration by) {
+            now = now.plus(by);
+        }
+
+        @Override
+        public Instant instant() {
+            return now;
+        }
+
+        @Override
+        public ZoneId getZone() {
+            return ZoneOffset.UTC;
+        }
+
+        @Override
+        public Clock withZone(ZoneId zone) {
+            return this;
+        }
+    }
+
+    @Test
+    void breakerOpensAfterConsecutiveUnansweredCallsAndClosesAfterAWhile() throws Exception {
+        ManualClock clock = new ManualClock();
+        DarkClient.Breaker breaker = new DarkClient.Breaker(clock);
+
+        for (int i = 1; i < DarkClient.Breaker.FAILURES_TO_OPEN; i++) {
+            breaker.failed();
+        }
+        breaker.check();
+        breaker.failed();
+        DarkException open = assertThrows(DarkException.class, breaker::check);
+        assertFalse(open.isRejection(), "a paused call does not count towards max-attempts");
+
+        clock.advance(DarkClient.Breaker.OPEN_FOR);
+        breaker.check();
+        breaker.failed();
+        assertThrows(DarkException.class, breaker::check, "one more unanswered call opens it again");
+    }
+
+    @Test
+    void anAnswerResetsTheBreaker() throws Exception {
+        DarkClient.Breaker breaker = new DarkClient.Breaker(new ManualClock());
+        for (int round = 0; round < 3; round++) {
+            for (int i = 1; i < DarkClient.Breaker.FAILURES_TO_OPEN; i++) {
+                breaker.failed();
+            }
+            breaker.succeeded();
+        }
+        breaker.check();
+    }
+
+    @Test
+    void callsFailAtOnceWhileTheMinterIsUnreachable() throws Exception {
+        server.close();
+        DarkClient client = new DarkClient(config(100),
+                HttpClient.newBuilder().version(HttpClient.Version.HTTP_1_1).build(), new DarkClient.Breaker(new ManualClock()));
+
+        for (int i = 0; i < DarkClient.Breaker.FAILURES_TO_OPEN; i++) {
+            assertTrue(assertThrows(DarkException.class, () -> client.get("ark:12345/a")).getMessage().startsWith("Minter unreachable:"));
+        }
+        assertTrue(assertThrows(DarkException.class, () -> client.get("ark:12345/a")).getMessage().contains("paused until"));
+    }
+
+    @Test
+    void anErrorResponseIsAnAnswerAndKeepsTheBreakerClosed() {
+        handlers.put("GET *", req -> new Resp(503, "{\"detail\":\"unavailable\"}"));
+        DarkClient client = client();
+        for (int i = 0; i < DarkClient.Breaker.FAILURES_TO_OPEN + 2; i++) {
+            assertEquals(503, assertThrows(DarkException.class, () -> client.get("ark:12345/a")).getHttpStatus());
+        }
     }
 
     // ---- transport ----

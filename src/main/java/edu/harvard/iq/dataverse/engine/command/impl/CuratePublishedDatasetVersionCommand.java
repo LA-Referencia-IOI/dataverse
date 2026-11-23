@@ -245,11 +245,10 @@ public class CuratePublishedDatasetVersionCommand extends AbstractDatasetCommand
     public boolean onSuccess(CommandContext ctxt, Object r) {
         boolean retVal = true;
         Dataset d = (Dataset) r;
-
+        
         ctxt.index().asyncIndexDataset(d, true);
-
         DarkHooks.datasetCurated(getDataset()); // dARK: resend metadata after commit
-
+        
         // And the exported metadata files
         try {
             ExportService instance = ExportService.getInstance();

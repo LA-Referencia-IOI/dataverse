@@ -9,12 +9,11 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/** Decision table 6.4 of the proposal. */
+/** Decision rules of {@link DarkPolicy}. */
 class DarkPolicyTest {
 
     @Test
-    void onPublishFollowsTable64() {
-        assertEquals(PublishAction.NO_ROW, DarkPolicy.onPublish(null));
+    void onPublishDependsOnTheState() {
         assertEquals(PublishAction.PUT, DarkPolicy.onPublish(DarkState.RESERVED));
         assertEquals(PublishAction.PUT, DarkPolicy.onPublish(DarkState.PUBLISHED));
         assertEquals(PublishAction.DEFER, DarkPolicy.onPublish(DarkState.DRAFT), "PUT on D would return 409");
@@ -23,20 +22,11 @@ class DarkPolicyTest {
     }
 
     @Test
-    void needsResendWhenLatestVersionWasNotSent() {
-        assertTrue(DarkPolicy.needsResend("1.0", "2.0"));
-        assertTrue(DarkPolicy.needsResend(null, "1.0"), "sent_version cleared after a curation while D/U");
-        assertFalse(DarkPolicy.needsResend("2.0", "2.0"));
-        assertFalse(DarkPolicy.needsResend("1.0", null), "no published version left");
-    }
-
-    @Test
     void publishedResetsAttemptsAndError() {
         StatusUpdate u = DarkPolicy.afterStatusCheck(DarkState.DRAFT, 7, DarkState.PUBLISHED, "old error", 20);
         assertEquals(DarkState.PUBLISHED, u.state());
         assertEquals(0, u.attempts());
         assertNull(u.lastError());
-        assertTrue(u.changed());
     }
 
     @Test
@@ -45,28 +35,35 @@ class DarkPolicyTest {
         assertEquals(DarkState.UPDATE, u.state());
         assertEquals(4, u.attempts());
         assertNull(u.lastError());
-        assertFalse(u.changed());
     }
 
     @Test
     void reachingMaxAttemptsMarksStuck() {
         StatusUpdate u = DarkPolicy.afterStatusCheck(DarkState.DRAFT, 19, DarkState.DRAFT, null, 20);
         assertEquals(20, u.attempts());
-        assertTrue(DarkPolicy.isStuck(u.lastError()), u.lastError());
+        assertTrue(u.lastError().startsWith(DarkPolicy.STUCK_PREFIX), u.lastError());
         assertTrue(u.lastError().contains("/worker/errors"));
+    }
+
+    @Test
+    void aRowIsStuckOnceItReachesMaxAttempts() {
+        assertFalse(DarkPolicy.isStuck(DarkState.DRAFT, 19, 20));
+        assertTrue(DarkPolicy.isStuck(DarkState.DRAFT, 20, 20), "status checks that never reached P");
+        assertTrue(DarkPolicy.isStuck(DarkState.RESERVED, 25, 20), "a PUT the Minter keeps rejecting");
+        assertFalse(DarkPolicy.isStuck(DarkState.TOMBSTONE, 25, 20), "nothing left to retry");
+    }
+
+    @Test
+    void exhaustedOtherIdRetriesPointToAssign() {
+        String error = DarkPolicy.otherIdExhausted(3);
+        assertTrue(error.startsWith(DarkPolicy.OTHER_ID_PREFIX), error);
+        assertTrue(error.contains("3/3") && error.contains("assign/{id}"), error);
     }
 
     @Test
     void tombstoneReportedByMinterIsKept() {
         StatusUpdate u = DarkPolicy.afterStatusCheck(DarkState.DRAFT, 2, DarkState.TOMBSTONE, null, 20);
         assertEquals(DarkState.TOMBSTONE, u.state());
-    }
-
-    @Test
-    void tombstoneOnDestroy() {
-        assertTrue(DarkPolicy.tombstoneOnDestroy(true, false), "published datasets are always tombstoned");
-        assertTrue(DarkPolicy.tombstoneOnDestroy(false, true));
-        assertFalse(DarkPolicy.tombstoneOnDestroy(false, false), "tombstone-unpublished-drafts=false");
     }
 
     @Test

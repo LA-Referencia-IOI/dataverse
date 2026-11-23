@@ -35,12 +35,6 @@ public final class DarkOtherId {
         return null;
     }
 
-    /** @return true if the version already exposes this ARK under the given agency. */
-    public static boolean has(DatasetVersion version, String agency, String ark) {
-        String found = DarkIds.normalizeArk(find(version, agency));
-        return found != null && found.equals(DarkIds.normalizeArk(ark));
-    }
-
     /**
      * @return true if any Other ID entry of the version holds this ARK, whatever its agency
      *         (a manual correction of the agency is respected). Both {@code ark:12345/x} and

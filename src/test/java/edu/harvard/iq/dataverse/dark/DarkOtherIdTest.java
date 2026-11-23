@@ -39,7 +39,6 @@ class DarkOtherIdTest {
     void addsFieldWhenAbsent() {
         assertTrue(DarkOtherId.put(version, otherIdType, "dARK", "ark:/12345/abc"));
         assertEquals(ARK, DarkOtherId.find(version, "dARK"), "stored in compact form");
-        assertTrue(DarkOtherId.has(version, "dARK", ARK));
         assertEquals(1, version.getDatasetFields().size());
     }
 
@@ -81,7 +80,7 @@ class DarkOtherIdTest {
     @Test
     void agencyMatchIsCaseInsensitive() {
         addExisting("DARK", ARK);
-        assertTrue(DarkOtherId.has(version, "dARK", ARK));
+        assertEquals(ARK, DarkOtherId.find(version, "dARK"));
         assertNull(DarkOtherId.find(version, "Other"));
     }
 

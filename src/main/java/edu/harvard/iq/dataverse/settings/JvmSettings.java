@@ -327,15 +327,13 @@ public enum JvmSettings {
     DARK_MINTER_URL(SCOPE_DARK, "minter-url"),
     DARK_AUTHORITY_ID(SCOPE_DARK, "authority-id"),
     DARK_NAAN(SCOPE_DARK, "naan"),
-    DARK_API_TOKEN(SCOPE_DARK, "api-token"),
-    DARK_AUTHORITY_HEADER(SCOPE_DARK, "authority-header"),
-    DARK_AUTHORITY_HEADER_ENABLED(DARK_AUTHORITY_HEADER, "enabled"),
+    DARK_KEY_DIRECTORY(SCOPE_DARK, "key-directory"),
+    DARK_ALLOW_HTTP(SCOPE_DARK, "allow-http"),
     DARK_BATCH_SIZE(SCOPE_DARK, "batch-size"),
     DARK_OTHER_ID_AGENCY(SCOPE_DARK, "other-id-agency"),
     DARK_TARGET(SCOPE_DARK, "target"),
     DARK_MAX_ATTEMPTS(SCOPE_DARK, "max-attempts"),
     DARK_HTTP_TIMEOUT_SECONDS(SCOPE_DARK, "http-timeout-seconds"),
-    DARK_TOMBSTONE_UNPUBLISHED_DRAFTS(SCOPE_DARK, "tombstone-unpublished-drafts"),
     DARK_PUBLISHER(SCOPE_DARK, "publisher"),
    ;
 

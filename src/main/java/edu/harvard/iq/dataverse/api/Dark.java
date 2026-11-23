@@ -4,11 +4,12 @@ import edu.harvard.iq.dataverse.Dataset;
 import edu.harvard.iq.dataverse.dark.DarkException;
 import edu.harvard.iq.dataverse.dark.DarkCsv;
 import edu.harvard.iq.dataverse.dark.DarkJob;
+import edu.harvard.iq.dataverse.dark.DarkReportBean;
 import edu.harvard.iq.dataverse.dark.DarkServiceBean;
-import edu.harvard.iq.dataverse.dark.DarkServiceBean.AssignedQuery;
-import edu.harvard.iq.dataverse.dark.DarkServiceBean.AssignedRow;
-import edu.harvard.iq.dataverse.dark.DarkServiceBean.MissingRow;
-import edu.harvard.iq.dataverse.dark.DarkServiceBean.Page;
+import edu.harvard.iq.dataverse.dark.DarkReportBean.AssignedQuery;
+import edu.harvard.iq.dataverse.dark.DarkReportBean.AssignedRow;
+import edu.harvard.iq.dataverse.dark.DarkReportBean.MissingRow;
+import edu.harvard.iq.dataverse.dark.DarkReportBean.Page;
 import edu.harvard.iq.dataverse.dark.DarkState;
 import edu.harvard.iq.dataverse.util.json.JsonUtil;
 import jakarta.ejb.EJB;
@@ -43,6 +44,9 @@ public class Dark extends AbstractApiBean {
     @EJB
     DarkServiceBean darkService;
 
+    @EJB
+    DarkReportBean darkReport;
+
     // ---- cron / lifecycle ----
 
     @POST
@@ -51,15 +55,7 @@ public class Dark extends AbstractApiBean {
             description = "Retries pending reservations, checks D/U states, resends pending versions and retries failed PUTs and tombstones. "
                     + "Does not assign dARKs to datasets that never had one (use assign-all). Runs in the background.")
     public Response refresh() {
-        if (!darkService.isEnabled()) {
-            return error(Status.SERVICE_UNAVAILABLE, "dARK is disabled or not configured (dataverse.dark.*)");
-        }
-        DarkJob job = DarkJob.tryStart("refresh");
-        if (job == null) {
-            return error(Status.CONFLICT, "Another dARK job is running: " + DarkJob.last().getName());
-        }
-        darkService.refreshAllAsync(job);
-        return ok("dARK refresh started; see /api/admin/dark/job", job.toJson());
+        return started(darkService::startRefresh);
     }
 
     @POST
@@ -100,15 +96,7 @@ public class Dark extends AbstractApiBean {
         if (limit < 0) {
             return badRequest("limit must be 0 or greater");
         }
-        if (!darkService.isEnabled()) {
-            return error(Status.SERVICE_UNAVAILABLE, "dARK is disabled or not configured (dataverse.dark.*)");
-        }
-        DarkJob job = DarkJob.tryStart("assign-all");
-        if (job == null) {
-            return error(Status.CONFLICT, "Another dARK job is running: " + DarkJob.last().getName());
-        }
-        darkService.assignAllAsync(job, limit);
-        return ok("dARK assign-all started; see /api/admin/dark/job", job.toJson());
+        return started(() -> darkService.startAssignAll(limit));
     }
 
     @POST
@@ -125,13 +113,42 @@ public class Dark extends AbstractApiBean {
         }
     }
 
+    // ---- signing key ----
+
+    @POST
+    @Path("key")
+    @Operation(summary = "Generate the key that signs the requests to the Minter",
+            description = "Returns only the public key (base64) and its id, to hand to the Minter administrator. "
+                    + "An existing key is never overwritten unless replace=true, which is only accepted while dARK is disabled.")
+    public Response generateKey(@Parameter(description = "Discard the current key and generate a new one")
+            @QueryParam("replace") @DefaultValue("false") boolean replace) {
+        try {
+            return ok(darkService.generateKey(replace));
+        } catch (DarkException e) {
+            return darkError(e);
+        }
+    }
+
+    @GET
+    @Path("key")
+    @Operation(summary = "Public key that signs the requests to the Minter",
+            description = "Also asks the Minter whether the authority is active and the NAAN authorized. "
+                    + "It cannot tell whether the key is registered: the first signed request does.")
+    public Response key() {
+        try {
+            return ok(darkService.key());
+        } catch (DarkException e) {
+            return darkError(e);
+        }
+    }
+
     // ---- status ----
 
     @GET
     @Path("count")
     @Operation(summary = "dARK counts by state, stuck, with errors and missing")
     public Response count() {
-        return ok(darkService.countsJson());
+        return ok(darkReport.counts());
     }
 
     @GET
@@ -160,12 +177,12 @@ public class Dark extends AbstractApiBean {
             @QueryParam("sort") @DefaultValue("updatedAt") String sort,
             @QueryParam("direction") @DefaultValue("DESC") String direction) {
         if (page < 0 || size < 1) {
-            return badRequest("page must be >= 0 and size >= 1 (max " + DarkServiceBean.MAX_PAGE_SIZE + ")");
+            return badRequest("page must be >= 0 and size >= 1 (max " + DarkReportBean.MAX_PAGE_SIZE + ")");
         }
         if ("missing".equalsIgnoreCase(view)) {
-            Page<MissingRow> p = darkService.listMissing(datasetId, page, size);
+            Page<MissingRow> p = darkReport.listMissing(datasetId, page, size);
             JsonArrayBuilder items = JsonUtil.createArrayBuilder();
-            p.items().forEach(r -> items.add(DarkServiceBean.toJson(r)));
+            p.items().forEach(r -> items.add(DarkReportBean.toJson(r)));
             return ok(JsonUtil.createObjectBuilder()
                     .add("view", "missing").add("page", p.page()).add("size", p.size()).add("total", p.total())
                     .add("items", items));
@@ -179,9 +196,9 @@ public class Dark extends AbstractApiBean {
         } catch (IllegalArgumentException e) {
             return badRequest(e.getMessage());
         }
-        Page<AssignedRow> p = darkService.listAssigned(q, page, size);
+        Page<AssignedRow> p = darkReport.listAssigned(q, page, size);
         JsonArrayBuilder items = JsonUtil.createArrayBuilder();
-        p.items().forEach(r -> items.add(DarkServiceBean.toJson(r)));
+        p.items().forEach(r -> items.add(DarkReportBean.toJson(r)));
         return ok(JsonUtil.createObjectBuilder()
                 .add("view", "assigned").add("page", p.page()).add("size", p.size()).add("total", p.total())
                 .add("items", items));
@@ -204,7 +221,7 @@ public class Dark extends AbstractApiBean {
             return badRequest(e.getMessage());
         }
         try {
-            return ok(toCsv(darkService.exportAssigned(q)), MediaType.valueOf("text/csv"), "dark-registry.csv");
+            return ok(DarkCsv.toCsv(darkReport.exportAssigned(q)), MediaType.valueOf("text/csv"), "dark-registry.csv");
         } catch (IOException e) {
             return error(Status.INTERNAL_SERVER_ERROR, "Could not build CSV: " + e.getMessage());
         }
@@ -226,8 +243,20 @@ public class Dark extends AbstractApiBean {
         return new AssignedQuery(ark, state, datasetId, errorsOnly, sort, "ASC".equalsIgnoreCase(direction));
     }
 
-    static String toCsv(Iterable<AssignedRow> rows) throws IOException {
-        return DarkCsv.toCsv(rows);
+    private interface JobStart {
+        DarkJob start() throws DarkException;
+    }
+
+    private Response started(JobStart start) {
+        try {
+            DarkJob job = start.start();
+            if (job == null) {
+                return error(Status.CONFLICT, "Another dARK job is running: " + DarkJob.last().getName());
+            }
+            return ok("dARK " + job.getName() + " started; see /api/admin/dark/job", job.toJson());
+        } catch (DarkException e) {
+            return darkError(e);
+        }
     }
 
     private Response darkError(DarkException e) {

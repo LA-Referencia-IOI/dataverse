@@ -1,6 +1,6 @@
 package edu.harvard.iq.dataverse.dark;
 
-import edu.harvard.iq.dataverse.dark.DarkServiceBean.AssignedRow;
+import edu.harvard.iq.dataverse.dark.DarkReportBean.AssignedRow;
 import java.io.IOException;
 import java.io.StringWriter;
 import org.apache.commons.csv.CSVFormat;

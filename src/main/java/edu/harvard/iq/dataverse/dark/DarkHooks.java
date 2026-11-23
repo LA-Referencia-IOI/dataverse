@@ -53,16 +53,10 @@ public final class DarkHooks {
         }
     }
 
-    /** {@code DeaccessionDatasetVersionCommand.onSuccess}: tombstone if no published version remains. */
-    public static void datasetDeaccessioned(Dataset dataset) {
-        if (isLocal(dataset)) {
-            call("deaccessioned", s -> s.onDatasetDeaccessioned(dataset.getId()));
-        }
-    }
-
     /**
      * {@code DestroyDatasetCommand.onSuccess}: tombstone. Also covers deleting a
-     * never-published dataset, which Dataverse implements as a destroy.
+     * never-published dataset, which Dataverse implements as a destroy. Deaccessioning
+     * never tombstones: a deaccessioned dataset can be published again.
      */
     public static void datasetDestroyed(Dataset dataset) {
         if (dataset == null || dataset.isHarvested() || !enabled()) {
@@ -70,8 +64,7 @@ public final class DarkHooks {
         }
         String clientItemId = DarkIds.clientItemId(dataset);
         if (clientItemId != null) {
-            boolean wasPublished = dataset.isReleased();
-            call("destroyed", s -> s.onDatasetDestroyed(clientItemId, wasPublished));
+            call("destroyed", s -> s.onDatasetDestroyed(clientItemId));
         }
     }
 
